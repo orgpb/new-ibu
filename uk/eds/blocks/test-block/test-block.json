@@ -1,3 +1,4 @@
 {
-  "title" : "this is spread operator block json"
+  "title" : "this is spread operator block json",
+  "id" : "test-block"
 }
