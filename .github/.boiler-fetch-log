@@ -1,4 +1,13 @@
 ---
+synced_at=2026-03-10T13:17:20Z
+source_repo=orgpb/boiler
+source_sha=987ad31e89be2e0048369c166eb25139e95f69dd
+source_short_sha=987ad31
+target_repo=orgpb/new-ibu
+target_dest_root=uk
+target_default_branch=main
+sync_branch=boiler-sync/987ad31
+---
 synced_at=2026-03-10T10:52:20Z
 source_repo=orgpb/boiler
 source_sha=cbcdc072aab9a00abfb7f45a2b5a5d05aad073f7
