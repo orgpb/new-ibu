@@ -1,0 +1,213 @@
+name: Sync from boiler
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '*/5 * * * *'  # Every minute — for testing. Change to '0 0 * * *' for daily at midnight UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# -------------------------------------------------------------------
+# Child-repo specific configuration — update these values per repo
+# -------------------------------------------------------------------
+env:
+  BOILER_REPO: orgpb/boiler          # Source boilerplate repo
+  CHILD_REPO: orgpb/new-ibu          # This child repo
+  DEST_ROOT: uk                      # Root folder inside this repo to sync into
+  SYNC_PATHS: |                      # One boiler source path per line
+    config/ibu
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout child repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      - name: Sync from boiler
+        shell: bash
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SYNC_TOKEN:-}" ]; then
+            echo "SYNC_TOKEN secret is missing."
+            exit 1
+          fi
+
+          echo "Boiler repo:  ${BOILER_REPO}"
+          echo "Child repo:   ${CHILD_REPO}"
+          echo "Dest root:    ${DEST_ROOT}"
+
+          # ------------------------------------------------------------------
+          # Clone the boiler repo into a temp directory
+          # ------------------------------------------------------------------
+          BOILER_DIR="$(mktemp -d)"
+          echo "Cloning boiler repo into ${BOILER_DIR}..."
+          git clone "https://x-access-token:${SYNC_TOKEN}@github.com/${BOILER_REPO}.git" "${BOILER_DIR}/boiler"
+
+          BOILER_SHA="$(git -C "${BOILER_DIR}/boiler" rev-parse HEAD)"
+          BOILER_SHORT_SHA="$(git -C "${BOILER_DIR}/boiler" rev-parse --short HEAD)"
+          echo "Boiler SHA: ${BOILER_SHA}"
+
+          # ------------------------------------------------------------------
+          # Detect the default branch of this child repo via GitHub API
+          # ------------------------------------------------------------------
+          DEFAULT_BRANCH_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${SYNC_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${CHILD_REPO}")
+
+          DEFAULT_BRANCH_HTTP_CODE=$(echo "${DEFAULT_BRANCH_RESPONSE}" | tail -n1)
+          DEFAULT_BRANCH_BODY=$(echo "${DEFAULT_BRANCH_RESPONSE}" | head -n-1)
+
+          if [ "${DEFAULT_BRANCH_HTTP_CODE}" != "200" ]; then
+            echo "ERROR: Could not fetch repo info for ${CHILD_REPO}. HTTP ${DEFAULT_BRANCH_HTTP_CODE}"
+            echo "${DEFAULT_BRANCH_BODY}"
+            exit 1
+          fi
+
+          DEFAULT_BRANCH=$(echo "${DEFAULT_BRANCH_BODY}" | grep -o '"default_branch": *"[^"]*"' | sed 's/"default_branch": *"\(.*\)"/\1/')
+          echo "Default branch: ${DEFAULT_BRANCH}"
+
+          # ------------------------------------------------------------------
+          # Create a new sync branch in the child repo (GITHUB_WORKSPACE)
+          # ------------------------------------------------------------------
+          SYNC_BRANCH="boiler-sync/${BOILER_SHORT_SHA}"
+          git checkout -b "${SYNC_BRANCH}"
+
+          # ------------------------------------------------------------------
+          # Loop over each configured SYNC_PATH
+          # ------------------------------------------------------------------
+          while IFS= read -r SRC_PATH; do
+            # Skip blank lines
+            [ -z "${SRC_PATH}" ] && continue
+
+            echo "----"
+            echo "Syncing path: ${SRC_PATH}"
+
+            BOILER_SRC="${BOILER_DIR}/boiler/${SRC_PATH}"
+            if [ ! -e "${BOILER_SRC}" ]; then
+              echo "ERROR: Source path does not exist in boiler repo: ${SRC_PATH}"
+              exit 1
+            fi
+
+            # ----------------------------------------------------------------
+            # Step 1: Copy boiler source into a temporary boiler/ staging area
+            #         inside the child workspace, preserving the full path
+            #         e.g. boiler/config/ibu/overlay/eds/blocks/test-block/test-block.json
+            # ----------------------------------------------------------------
+            mkdir -p "boiler/$(dirname "${SRC_PATH}")"
+            rsync -a "${BOILER_SRC}" "boiler/$(dirname "${SRC_PATH}")/"
+
+            # ----------------------------------------------------------------
+            # Step 2: Map boiler/<SRC_PATH>/overlay/  →  <DEST_ROOT>/
+            # ----------------------------------------------------------------
+            STRIP_PREFIX="boiler/${SRC_PATH}/overlay"
+            echo "Strip prefix: ${STRIP_PREFIX}"
+
+            find "boiler/${SRC_PATH}/overlay" -type f | while read -r STAGED_FILE; do
+              REL_PATH="${STAGED_FILE#${STRIP_PREFIX}/}"
+              DEST_FILE="${DEST_ROOT}/${REL_PATH}"
+
+              echo "  Applying: ${STAGED_FILE}"
+              echo "       → ${DEST_FILE}"
+
+              mkdir -p "$(dirname "${DEST_FILE}")"
+              cp -f "${STAGED_FILE}" "${DEST_FILE}"
+            done
+
+          done <<< "${SYNC_PATHS}"
+
+          # ------------------------------------------------------------------
+          # Step 3: Remove the temporary boiler/ staging folder
+          # ------------------------------------------------------------------
+          rm -rf boiler
+          echo "Removed temporary boiler/ staging folder."
+
+          # ------------------------------------------------------------------
+          # Step 4: Write new entry to .github/.boiler-fetch-log (keep last 10)
+          # ------------------------------------------------------------------
+          mkdir -p .github
+          FETCH_LOG=".github/.boiler-fetch-log"
+
+          NEW_ENTRY_FILE="$(mktemp)"
+          {
+            echo "---"
+            echo "synced_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "source_repo=${BOILER_REPO}"
+            echo "source_sha=${BOILER_SHA}"
+            echo "source_short_sha=${BOILER_SHORT_SHA}"
+            echo "target_repo=${CHILD_REPO}"
+            echo "target_dest_root=${DEST_ROOT}"
+            echo "target_default_branch=${DEFAULT_BRANCH}"
+            echo "sync_branch=${SYNC_BRANCH}"
+          } > "${NEW_ENTRY_FILE}"
+
+          COMBINED_FILE="$(mktemp)"
+          if [ -f "${FETCH_LOG}" ]; then
+            cat "${NEW_ENTRY_FILE}" "${FETCH_LOG}" > "${COMBINED_FILE}"
+          else
+            cat "${NEW_ENTRY_FILE}" > "${COMBINED_FILE}"
+          fi
+
+          awk '
+            /^---$/ { block_count++; if (block_count > 10) exit }
+            block_count >= 1 { print }
+          ' "${COMBINED_FILE}" > "${FETCH_LOG}"
+
+          rm -f "${NEW_ENTRY_FILE}" "${COMBINED_FILE}"
+          echo "Updated .github/.boiler-fetch-log (max 10 entries retained)"
+
+          # ------------------------------------------------------------------
+          # Step 5: Commit, push, and raise PR
+          # ------------------------------------------------------------------
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit for ${CHILD_REPO}, skipping PR."
+          else
+            git config user.name "boiler-sync-bot"
+            git config user.email "boiler-sync-bot@users.noreply.github.com"
+            git commit -m "Sync from ${BOILER_REPO}@${BOILER_SHA}"
+
+            git push "https://x-access-token:${SYNC_TOKEN}@github.com/${CHILD_REPO}.git" "${SYNC_BRANCH}"
+            echo "Pushed branch '${SYNC_BRANCH}' to ${CHILD_REPO}"
+
+            PR_RESPONSE=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Authorization: Bearer ${SYNC_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${CHILD_REPO}/pulls" \
+              -d "{
+                \"title\": \"Sync from ${BOILER_REPO}@${BOILER_SHORT_SHA}\",
+                \"body\": \"Automated sync from [${BOILER_REPO}@${BOILER_SHA}](https://github.com/${BOILER_REPO}/commit/${BOILER_SHA}).\n\nPlease review and merge to apply the latest boiler updates.\",
+                \"head\": \"${SYNC_BRANCH}\",
+                \"base\": \"${DEFAULT_BRANCH}\"
+              }")
+
+            PR_HTTP_CODE=$(echo "${PR_RESPONSE}" | tail -n1)
+            PR_BODY=$(echo "${PR_RESPONSE}" | head -n-1)
+
+            if [ "${PR_HTTP_CODE}" = "201" ]; then
+              PR_URL=$(echo "${PR_BODY}" | grep -o '"html_url": *"[^"]*"' | head -1 | sed 's/"html_url": *"\(.*\)"/\1/')
+              echo "Pull Request created: ${PR_URL}"
+            else
+              echo "ERROR: Failed to create PR. HTTP ${PR_HTTP_CODE}"
+              echo "${PR_BODY}"
+              exit 1
+            fi
+          fi
+
+          rm -rf "${BOILER_DIR}"
