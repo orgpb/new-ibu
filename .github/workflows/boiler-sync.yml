@@ -136,41 +136,7 @@ jobs:
           echo "Removed temporary boiler/ staging folder."
 
           # ------------------------------------------------------------------
-          # Step 4: Write new entry to .github/.boiler-fetch-log (keep last 10)
-          # ------------------------------------------------------------------
-          mkdir -p .github
-          FETCH_LOG=".github/.boiler-fetch-log"
-
-          NEW_ENTRY_FILE="$(mktemp)"
-          {
-            echo "---"
-            echo "synced_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-            echo "source_repo=${BOILER_REPO}"
-            echo "source_sha=${BOILER_SHA}"
-            echo "source_short_sha=${BOILER_SHORT_SHA}"
-            echo "target_repo=${CHILD_REPO}"
-            echo "target_dest_root=${DEST_ROOT}"
-            echo "target_default_branch=${DEFAULT_BRANCH}"
-            echo "sync_branch=${SYNC_BRANCH}"
-          } > "${NEW_ENTRY_FILE}"
-
-          COMBINED_FILE="$(mktemp)"
-          if [ -f "${FETCH_LOG}" ]; then
-            cat "${NEW_ENTRY_FILE}" "${FETCH_LOG}" > "${COMBINED_FILE}"
-          else
-            cat "${NEW_ENTRY_FILE}" > "${COMBINED_FILE}"
-          fi
-
-          awk '
-            /^---$/ { block_count++; if (block_count > 10) exit }
-            block_count >= 1 { print }
-          ' "${COMBINED_FILE}" > "${FETCH_LOG}"
-
-          rm -f "${NEW_ENTRY_FILE}" "${COMBINED_FILE}"
-          echo "Updated .github/.boiler-fetch-log (max 10 entries retained)"
-
-          # ------------------------------------------------------------------
-          # Step 5: Commit, push, and raise PR
+          # Step 4: Commit, push, and raise PR
           # ------------------------------------------------------------------
           git add -A
 
