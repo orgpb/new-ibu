@@ -1,3 +1,4 @@
 {
-  "title" : "this is new block added to test WF new ID"
+  "title" : "this is new block added to test WF new ID",
+  "id" : "test-block-two"
 }
